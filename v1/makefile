@@ -11,6 +11,12 @@ $(EXE): $(SRC)
 
 run: $(EXE)
 	./$(EXE)
+	
+gprof: $(SRC)
+	$(CC) $(CFLAGS) -pg -o $(EXE) $(SRC) -lm
+	./$(EXE)
+	gprof $(EXE) gmon.out > gprof_report.txt
 
 clean:
 	rm -f $(EXE)
+	rm -f gmon.out
