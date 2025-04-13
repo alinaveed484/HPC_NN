@@ -1,1 +1,12 @@
 *.exe
+
+# gprof output files
+gmon.out
+*.gmon
+
+# Optional: ignore other common build artifacts
+*.o
+*.out
+*.obj
+*.elf
+*.map
