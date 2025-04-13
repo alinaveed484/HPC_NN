@@ -87,7 +87,7 @@ void forward(NeuralNetwork* net, double* input, double* hidden, double* output) 
             hidden[i] += net->W1[i][j] * input[j];
     }
     relu(hidden, HIDDEN_SIZE);
-
+    //printf("hidden[0]: %f", hidden[0]);
     for (int i = 0; i < OUTPUT_SIZE; i++) {
         output[i] = net->b2[i];
         for (int j = 0; j < HIDDEN_SIZE; j++)

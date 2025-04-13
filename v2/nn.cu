@@ -2,14 +2,13 @@
 #include <stdlib.h>
 #include <math.h>
 #include <time.h>
-#include <cuda.h> 
+#include <cuda.h>
 
 #define INPUT_SIZE 784
 #define HIDDEN_SIZE 128
 #define OUTPUT_SIZE 10
 #define LEARNING_RATE 0.01
 #define EPOCHS 3
-#define BATCH_SIZE 64
 #define NUM_CLASSES 10  // Digits 0-9
 
 // Timer function
@@ -17,202 +16,268 @@ double get_time(clock_t start) {
     return (double)(clock() - start) / CLOCKS_PER_SEC;
 }
 
-// Allocate memory for a matrix
-double** allocateMatrix(int rows, int cols) {
-    double** mat = (double**)malloc(rows * sizeof(double*));
-    for (int i = 0; i < rows; i++) {
-        mat[i] = (double*)malloc(cols * sizeof(double));
+// ---------------------------------------
+// Allocate contiguous memory for images/labels.
+// Caller is responsible for freeing the returned pointer.
+double* allocateContiguous(int numElements) {
+    double* data = (double*)malloc(numElements * sizeof(double));
+    if (!data) {
+        fprintf(stderr, "Error allocating memory\n");
+        exit(EXIT_FAILURE);
     }
-    return mat;
+    return data;
 }
 
-// Free allocated matrix memory
-void freeMatrix(double** mat, int rows) {
-    for (int i = 0; i < rows; i++) {
-        free(mat[i]);
-    }
-    free(mat);
-}
-
-// Activation functions
-__device__ void relu(double* x, int size) {
-    for (int i = 0; i < size; i++) {
-        x[i] = (x[i] > 0) ? x[i] : 0;
-    }
-}
-
-__device__ void softmax(double* x, int size) {
-    double sum = 0;
-    for (int i = 0; i < size; i++) {
-        x[i] = exp(x[i]);
-        sum += x[i];
-    }
-    for (int i = 0; i < size; i++) {
-        x[i] /= sum;
-    }
-}
-
-// Neural network structure
+// ---------------------------------------
+// Neural Network with contiguous weight arrays on host.
 typedef struct {
-    double** W1;
-    double** W2;
-    double* b1;
-    double* b2;
+    double* W1;  // Dimensions: HIDDEN_SIZE x INPUT_SIZE (flattened row-major)
+    double* W2;  // Dimensions: OUTPUT_SIZE x HIDDEN_SIZE (flattened row-major)
+    double* b1;  // Dimensions: HIDDEN_SIZE
+    double* b2;  // Dimensions: OUTPUT_SIZE
 } NeuralNetwork;
 
-// Initialize neural network
+// Create a new network with weights and biases allocated contiguously.
 NeuralNetwork* createNetwork() {
     NeuralNetwork* net = (NeuralNetwork*)malloc(sizeof(NeuralNetwork));
-    net->W1 = allocateMatrix(HIDDEN_SIZE, INPUT_SIZE);
-    net->W2 = allocateMatrix(OUTPUT_SIZE, HIDDEN_SIZE);
+    net->W1 = (double*)malloc(HIDDEN_SIZE * INPUT_SIZE * sizeof(double));
+    net->W2 = (double*)malloc(OUTPUT_SIZE * HIDDEN_SIZE * sizeof(double));
     net->b1 = (double*)calloc(HIDDEN_SIZE, sizeof(double));
     net->b2 = (double*)calloc(OUTPUT_SIZE, sizeof(double));
 
     srand(time(NULL));
-    for (int i = 0; i < HIDDEN_SIZE; i++)
-        for (int j = 0; j < INPUT_SIZE; j++)
-            net->W1[i][j] = ((double)rand() / RAND_MAX) * 0.01;
-
-    for (int i = 0; i < OUTPUT_SIZE; i++)
-        for (int j = 0; j < HIDDEN_SIZE; j++)
-            net->W2[i][j] = ((double)rand() / RAND_MAX) * 0.01;
-
+    for (int i = 0; i < HIDDEN_SIZE * INPUT_SIZE; i++) {
+        net->W1[i] = ((double)rand() / RAND_MAX) * 0.01;
+    }
+    for (int i = 0; i < OUTPUT_SIZE * HIDDEN_SIZE; i++) {
+        net->W2[i] = ((double)rand() / RAND_MAX) * 0.01;
+    }
     return net;
 }
 
-// Function to offload a NeuralNetwork from host to device
-NeuralNetwork* allocateDeviceNetwork(NeuralNetwork* h_net) {
-    double *d_W1, *d_W2, *d_b1, *d_b2;
-
-    // Allocate device memory for flat weight matrices and biases.
-    cudaMalloc((void**)&d_W1, HIDDEN_SIZE * INPUT_SIZE * sizeof(double));
-    cudaMalloc((void**)&d_W2, OUTPUT_SIZE * HIDDEN_SIZE * sizeof(double));
-    cudaMalloc((void**)&d_b1, HIDDEN_SIZE * sizeof(double));
-    cudaMalloc((void**)&d_b2, OUTPUT_SIZE * sizeof(double));
-
-    // Copy host network weights and biases to device.
-    cudaMemcpy(d_W1, h_net->W1[0], HIDDEN_SIZE * INPUT_SIZE * sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_W2, h_net->W2[0], OUTPUT_SIZE * HIDDEN_SIZE * sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_b1, h_net->b1, HIDDEN_SIZE * sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy(d_b2, h_net->b2, OUTPUT_SIZE * sizeof(double), cudaMemcpyHostToDevice);
-
-    // Build a host-side NeuralNetwork struct that holds the device pointers.
-    // Note: We reinterpret d_W1 and d_W2 as double** for now.
-    NeuralNetwork h_net_dev;
-    h_net_dev.W1 = (double**)d_W1;  // Actually, on device this will be used as a flat array.
-    h_net_dev.W2 = (double**)d_W2;  // Ensure your device kernels treat these as flat arrays.
-    h_net_dev.b1 = d_b1;
-    h_net_dev.b2 = d_b2;
-
-    // Allocate device memory for the NeuralNetwork struct.
-    NeuralNetwork* d_net;
-    cudaMalloc((void**)&d_net, sizeof(NeuralNetwork));
-    // Copy our constructed host struct (with device pointers) to device memory.
-    cudaMemcpy(d_net, &h_net_dev, sizeof(NeuralNetwork), cudaMemcpyHostToDevice);
-
-    return d_net;
+// Free network memory.
+void freeNetwork(NeuralNetwork* net) {
+    free(net->W1);
+    free(net->W2);
+    free(net->b1);
+    free(net->b2);
+    free(net);
 }
 
-// Forward pass
+// ---------------------------------------
+// Host (CPU) forward pass.
+// input: pointer to one image (length INPUT_SIZE)
+// hidden: pointer to hidden layer array (length HIDDEN_SIZE)
+// output: pointer to output layer array (length OUTPUT_SIZE)
 void forward(NeuralNetwork* net, double* input, double* hidden, double* output) {
+    // Compute hidden layer: z = W1 * input + b1, then apply ReLU.
     for (int i = 0; i < HIDDEN_SIZE; i++) {
-        hidden[i] = net->b1[i];
-        for (int j = 0; j < INPUT_SIZE; j++)
-            hidden[i] += net->W1[i][j] * input[j];
+        double sum = net->b1[i];
+        for (int j = 0; j < INPUT_SIZE; j++) {
+            sum += net->W1[i * INPUT_SIZE + j] * input[j];
+        }
+        hidden[i] = (sum > 0.0) ? sum : 0.0;
     }
-    relu(hidden, HIDDEN_SIZE);
-
+    // Compute output layer: z = W2 * hidden + b2.
     for (int i = 0; i < OUTPUT_SIZE; i++) {
-        output[i] = net->b2[i];
-        for (int j = 0; j < HIDDEN_SIZE; j++)
-            output[i] += net->W2[i][j] * hidden[j];
+        double sum = net->b2[i];
+        for (int j = 0; j < HIDDEN_SIZE; j++) {
+            sum += net->W2[i * HIDDEN_SIZE + j] * hidden[j];
+        }
+        output[i] = sum;
     }
-    softmax(output, OUTPUT_SIZE);
+    // Softmax activation for output.
+    double max_x = output[0];
+    for (int i = 1; i < OUTPUT_SIZE; i++) {
+        if(output[i] > max_x) max_x = output[i];
+    }
+    double sum = 0.0;
+    for (int i = 0; i < OUTPUT_SIZE; i++) {
+        output[i] = exp(output[i] - max_x);
+        sum += output[i];
+    }
+    if(sum == 0.0) {
+        for (int i = 0; i < OUTPUT_SIZE; i++)
+            output[i] = 1.0 / OUTPUT_SIZE;
+    } else {
+        for (int i = 0; i < OUTPUT_SIZE; i++)
+            output[i] /= sum;
+    }
 }
 
-// Forward pass CUDA FUNCTION
-__global__ void forward_kernel(NeuralNetwork* net, double* input, double* hidden, double* output) {
-    int tid = threadIdx.x + (blockIdx.x * blockdim.x);
+// ---------------------------------------
+// Device function: Softmax used in kernel.
+__device__ void kernelsoftmax(double* x, int size) {
+    double max_x = x[0];
+    for (int i = 1; i < size; i++) {
+        if (x[i] > max_x)
+            max_x = x[i];
+    }
+    double sum = 0.0;
+    for (int i = 0; i < size; i++) {
+        x[i] = exp(x[i] - max_x);
+        sum += x[i];
+    }
+    if(sum == 0.0) {
+        for (int i = 0; i < size; i++)
+            x[i] = 1.0 / size;
+    } else {
+        for (int i = 0; i < size; i++)
+            x[i] /= sum;
+    }
+}
+
+// ---------------------------------------
+// CUDA Forward pass Kernel.
+// d_W1: device pointer for W1 (HIDDEN_SIZE * INPUT_SIZE)
+// d_W2: device pointer for W2 (OUTPUT_SIZE * HIDDEN_SIZE)
+// d_b1: device pointer for b1 (HIDDEN_SIZE)
+// d_b2: device pointer for b2 (OUTPUT_SIZE)
+// input: pointer for one image (INPUT_SIZE)
+// hidden: pointer for hidden activations (HIDDEN_SIZE)
+// output: pointer for output activations (OUTPUT_SIZE)
+__global__ void forward_kernel(double* d_W1, double* d_W2, double* d_b1, double* d_b2,
+                               double* input, double* hidden, double* output) {
+    int tid = threadIdx.x + (blockIdx.x * blockDim.x);
     
-    // Compute hidden layer activations in parallel (for tid < HIDDEN_SIZE).
-    if(tid < HIDDEN_SIZE) {
-        double sum = net->b1[tid];
+    // Hidden layer: each thread computes one neuron if tid < HIDDEN_SIZE.
+    if (tid < HIDDEN_SIZE) {
+        double sum = d_b1[tid];
         for (int j = 0; j < INPUT_SIZE; j++) {
-            sum += net->W1[tid * INPUT_SIZE + j] * input[j];
+            sum += d_W1[tid * INPUT_SIZE + j] * input[j];
         }
-        // Apply ReLU activation.
         hidden[tid] = (sum > 0.0) ? sum : 0.0;
     }
-    __syncthreads(); // Ensure all hidden neurons are computed.
-    
-    // Compute output layer activations in parallel (for tid < OUTPUT_SIZE).
-    if(tid < OUTPUT_SIZE) {
-        double sum = net->b2[tid];
+    __syncthreads();
+
+    // Output layer: each thread computes one neuron if tid < OUTPUT_SIZE.
+    if (tid < OUTPUT_SIZE) {
+        double sum = d_b2[tid];
         for (int j = 0; j < HIDDEN_SIZE; j++) {
-            sum += net->W2[tid * HIDDEN_SIZE + j] * hidden[j];
+            sum += d_W2[tid * HIDDEN_SIZE + j] * hidden[j];
         }
         output[tid] = sum;
     }
     __syncthreads();
-    
-    // Let one thread perform the softmax (or consider a parallel softmax if needed).
-    if(tid == 0) {
-        softmax(output, OUTPUT_SIZE);
+
+    // One thread applies softmax.
+    if (tid == 0) {
+        kernelsoftmax(output, OUTPUT_SIZE);
     }
 }
-// Backpropagation
-void backward(NeuralNetwork* net, double* input, double* hidden, double* output, double* target) {
-    double d_output[OUTPUT_SIZE], d_hidden[HIDDEN_SIZE];
 
-    // Compute output layer gradient
-    for (int i = 0; i < OUTPUT_SIZE; i++)
-        d_output[i] = output[i] - target[i];
+// ---------------------------------------
+// CUDA Backward pass Kernel.
+// d_W1, d_W2, d_b1, d_b2: device pointers for weights and biases.
+// input: pointer for one image (INPUT_SIZE)
+// hidden: pointer for hidden activations (HIDDEN_SIZE)
+// output: pointer for output activations (OUTPUT_SIZE)
+// target: pointer for one label vector (OUTPUT_SIZE)
+__global__ void backward_kernel(double* d_W1, double* d_W2, double* d_b1, double* d_b2,
+                                double* input, double* hidden, double* output, double* target) {
+    int tid = threadIdx.x + blockIdx.x * blockDim.x;
 
-    // Compute hidden layer gradient
-    for (int i = 0; i < HIDDEN_SIZE; i++) {
-        d_hidden[i] = 0;
-        for (int j = 0; j < OUTPUT_SIZE; j++)
-            d_hidden[i] += net->W2[j][i] * d_output[j];
-        d_hidden[i] *= (hidden[i] > 0);
+    // Update hidden layer weights and biases in parallel.
+    if (tid < HIDDEN_SIZE) {
+        double sum = 0.0;
+        for (int j = 0; j < OUTPUT_SIZE; j++) {
+            double d_output = output[j] - target[j];
+            sum += d_W2[j * HIDDEN_SIZE + tid] * d_output;
+        }
+        double d_hidden = sum * ((hidden[tid] > 0.0) ? 1.0 : 0.0);
+        for (int j = 0; j < INPUT_SIZE; j++) {
+            d_W1[tid * INPUT_SIZE + j] -= LEARNING_RATE * d_hidden * input[j];
+        }
+        d_b1[tid] -= LEARNING_RATE * d_hidden;
     }
+    __syncthreads();
 
-    // Update weights (gradient descent)
-    for (int i = 0; i < OUTPUT_SIZE; i++)
-        for (int j = 0; j < HIDDEN_SIZE; j++)
-            net->W2[i][j] -= LEARNING_RATE * d_output[i] * hidden[j];
-
-    for (int i = 0; i < HIDDEN_SIZE; i++)
-        for (int j = 0; j < INPUT_SIZE; j++)
-            net->W1[i][j] -= LEARNING_RATE * d_hidden[i] * input[j];
-
-    for (int i = 0; i < OUTPUT_SIZE; i++)
-        net->b2[i] -= LEARNING_RATE * d_output[i];
-
-    for (int i = 0; i < HIDDEN_SIZE; i++)
-        net->b1[i] -= LEARNING_RATE * d_hidden[i];
+    // Use one thread to update the output layer.
+    if (tid == 0) {
+        for (int i = 0; i < OUTPUT_SIZE; i++) {
+            double d_output = output[i] - target[i];
+            for (int j = 0; j < HIDDEN_SIZE; j++) {
+                d_W2[i * HIDDEN_SIZE + j] -= LEARNING_RATE * d_output * hidden[j];
+            }
+            d_b2[i] -= LEARNING_RATE * d_output;
+        }
+    }
 }
 
-// Train network
-void train(NeuralNetwork* net, double** H_images, double** H_labels, int numImages) {
+// ---------------------------------------
+// Load MNIST Images from file into a contiguous array.
+// Returns a pointer to an array of doubles of length (numImages * INPUT_SIZE).
+double* loadMNISTImages(const char* filename, int numImages) {
+    FILE* file = fopen(filename, "rb");
+    if (!file) {
+        printf("Error opening %s\n", filename);
+        exit(EXIT_FAILURE);
+    }
+    fseek(file, 16, SEEK_SET);
+    double* images = allocateContiguous(numImages * INPUT_SIZE);
+    for (int i = 0; i < numImages; i++) {
+        for (int j = 0; j < INPUT_SIZE; j++) {
+            unsigned char pixel;
+            if (fread(&pixel, sizeof(unsigned char), 1, file) != 1) {
+                fprintf(stderr, "Error: Failed to read pixel\n");
+                fclose(file);
+                exit(EXIT_FAILURE);
+            }
+            images[i * INPUT_SIZE + j] = pixel / 255.0;
+        }
+    }
+    fclose(file);
+    return images;
+}
 
-    // Device pointers
+// ---------------------------------------
+// Load MNIST Labels from file into a contiguous array.
+// Returns a pointer to an array of doubles of length (numLabels * OUTPUT_SIZE).
+// Each label is one-hot encoded.
+double* loadMNISTLabels(const char* filename, int numLabels) {
+    FILE* file = fopen(filename, "rb");
+    if (!file) {
+        printf("Error opening %s\n", filename);
+        exit(EXIT_FAILURE);
+    }
+    fseek(file, 8, SEEK_SET);
+    double* labels = allocateContiguous(numLabels * OUTPUT_SIZE);
+    for (int i = 0; i < numLabels; i++) {
+        unsigned char label;
+        if (fread(&label, sizeof(unsigned char), 1, file) != 1) {
+            fprintf(stderr, "Error: Failed to read label\n");
+            fclose(file);
+            exit(EXIT_FAILURE);
+        }
+        for (int j = 0; j < OUTPUT_SIZE; j++) {
+            labels[i * OUTPUT_SIZE + j] = (j == label) ? 1.0 : 0.0;
+        }
+    }
+    fclose(file);
+    return labels;
+}
+
+// ---------------------------------------
+// Train network: run both CUDA kernel and serial forward passes for each image,
+// compare the hidden and output activations, and perform backward pass.
+void train(NeuralNetwork* net,
+           double* d_W1, double* d_W2, double* d_b1, double* d_b2,
+           double* H_images, double* H_labels, int numImages) {
+
+    // Allocate device memory for entire training set input and label arrays.
     double* D_images;
     double* D_labels;
-    double* D_hidden;
-    double* D_output;
-
-    // Allocate memory on device
     cudaMalloc((void**)&D_images, numImages * INPUT_SIZE * sizeof(double));
     cudaMalloc((void**)&D_labels, numImages * OUTPUT_SIZE * sizeof(double));
 
-    //copying data to the device side.
-    cudaMemcpy(D_images, H_images[0], numImages * INPUT_SIZE * sizeof(double), cudaMemcpyHostToDevice);
-    cudaMemcpy(D_labels, H_labels[0], numImages * OUTPUT_SIZE * sizeof(double), cudaMemcpyHostToDevice);
+    cudaMemcpy(D_images, H_images, numImages * INPUT_SIZE * sizeof(double), cudaMemcpyHostToDevice);
+    cudaMemcpy(D_labels, H_labels, numImages * OUTPUT_SIZE * sizeof(double), cudaMemcpyHostToDevice);
 
-
-    cudaMalloc(&D_hidden, numImages * HIDDEN_SIZE * sizeof(double));
-    cudaMalloc(&D_output, numImages * OUTPUT_SIZE * sizeof(double));
-
+    // Device memory for hidden and output layers (for one image at a time).
+    double* D_hidden;
+    double* D_output;
+    cudaMalloc((void**)&D_hidden, HIDDEN_SIZE * sizeof(double));
+    cudaMalloc((void**)&D_output, OUTPUT_SIZE * sizeof(double));
 
     double h_output[OUTPUT_SIZE];
 
@@ -223,150 +288,113 @@ void train(NeuralNetwork* net, double** H_images, double** H_labels, int numImag
         int correct = 0;
 
         for (int i = 0; i < numImages; i++) {
-           // double hidden[HIDDEN_SIZE], output[OUTPUT_SIZE];
-            double* hidden = &D_hidden[i * HIDDEN_SIZE];
-            double* output = &D_output[i * OUTPUT_SIZE];
-            
-            forward_kernel<<<4,32>>>(net, D_images+(i * INPUT_SIZE), hidden, output);
+            // Compute pointer offsets for current image and label.
+            double* d_input = D_images + (i * INPUT_SIZE);
+            double* d_label = D_labels + (i * OUTPUT_SIZE);
 
+            // --- GPU Forward Pass ---
+            forward_kernel<<<4, 32>>>(d_W1, d_W2, d_b1, d_b2, d_input, D_hidden, D_output);
+            cudaDeviceSynchronize();
+  
+            // --- Backward Pass (CUDA Kernel) ---
+            int threadsPerBlock = 256;
+            int blocks = (HIDDEN_SIZE + threadsPerBlock - 1) / threadsPerBlock;
+            backward_kernel<<<blocks, threadsPerBlock>>>(d_W1, d_W2, d_b1, d_b2,
+                                                          d_input, D_hidden, D_output, d_label);
             cudaDeviceSynchronize();
 
-            backward(net, D_images+(i * INPUT_SIZE), hidden, output, D_labels + (i * OUTPUT_SIZE));
+            // Copy the output from device to host for loss & accuracy computation.
+            cudaMemcpy(h_output, D_output, OUTPUT_SIZE * sizeof(double), cudaMemcpyDeviceToHost);
 
-            cudaDeviceSynchronize();
-
-            // Copy the output for the current image from device to host
-            cudaMemcpy(h_output, output, OUTPUT_SIZE * sizeof(double), cudaMemcpyDeviceToHost);
-            
-            // Compute loss & accuracy
-            for (int k = 0; k < OUTPUT_SIZE; k++) loss -= labels[i][k] * log(h_output[k]);
+            // Compute loss and accuracy.
+            for (int k = 0; k < OUTPUT_SIZE; k++) {
+                loss -= H_labels[i * OUTPUT_SIZE + k] * log(h_output[k]);
+            }
             int pred = 0, actual = 0;
             for (int j = 0; j < OUTPUT_SIZE; j++) {
                 if (h_output[j] > h_output[pred]) pred = j;
-                if (labels[i][j] > labels[i][actual]) actual = j;
+                if (H_labels[i * OUTPUT_SIZE + j] > H_labels[i * OUTPUT_SIZE + actual]) actual = j;
             }
-            if (pred == actual) correct++;
+            if (pred == actual)
+                correct++;
         }
 
         printf("Epoch %d - Loss: %.4f - Train Accuracy: %.2f%% - Time: %.3fs\n",
                epoch + 1, loss / numImages, (correct / (double)numImages) * 100, get_time(epoch_start));
     }
     printf("Total training time: %.3fs\n", get_time(total_start));
+
+    cudaFree(D_images);
+    cudaFree(D_labels);
+    cudaFree(D_hidden);
+    cudaFree(D_output);
 }
 
-// Evaluate accuracy on test data
-void evaluate(NeuralNetwork* net, double** images, double** labels, int numImages) {
+// ---------------------------------------
+// Evaluate network on test data using serial forward pass.
+void evaluate(NeuralNetwork* net, double* images, double* labels, int numImages) {
     int correct = 0;
     for (int i = 0; i < numImages; i++) {
         double hidden[HIDDEN_SIZE], output[OUTPUT_SIZE];
-        forward(net, images[i], hidden, output);
+        
+        forward(net, images + (i * INPUT_SIZE), hidden, output);
+        
         int pred = 0, actual = 0;
         for (int j = 0; j < OUTPUT_SIZE; j++) {
             if (output[j] > output[pred]) pred = j;
-            if (labels[i][j] > labels[i][actual]) actual = j;
+            if (labels[i * OUTPUT_SIZE + j] > labels[i * OUTPUT_SIZE + actual]) actual = j;
         }
-        if (pred == actual) correct++;
+        if (pred == actual)
+            correct++;
     }
     printf("Test Accuracy: %.2f%%\n", (correct / (double)numImages) * 100);
 }
 
-// Read MNIST dataset
-double** loadMNISTImages(const char* filename, int numImages) {
-    FILE* file = fopen(filename, "rb");
-    if (!file) {
-        printf("Error opening %s\n", filename);
-        exit(1);
-    }
-    fseek(file, 16, SEEK_SET);
-    double** images = allocateMatrix(numImages, INPUT_SIZE);
-    for (int i = 0; i < numImages; i++) {
-        for (int j = 0; j < INPUT_SIZE; j++) {
-            unsigned char pixel;
-
-            // fread(&pixel, sizeof(unsigned char), 1, file);
-            if (fread(&pixel, sizeof(unsigned char), 1, file) != 1) {
-                fprintf(stderr, "Error: Failed to read pixel\n");
-                fclose(file);
-                exit(EXIT_FAILURE);
-            }
-
-            images[i][j] = pixel / 255.0;
-        }
-    }
-    fclose(file);
-    return images;
-}
-
-
-double** loadMNISTLabels(const char* filename, int numLabels) {
-    FILE* file = fopen(filename, "rb");
-    if (!file) {
-        printf("Error opening %s\n", filename);
-        exit(1);
-    }
-    fseek(file, 8, SEEK_SET);
-    double** labels = allocateMatrix(numLabels, OUTPUT_SIZE);
-    for (int i = 0; i < numLabels; i++) {
-        unsigned char label;
-        // fread(&label, sizeof(unsigned char), 1, file);
-        if (fread(&label, sizeof(unsigned char), 1, file) != 1) {
-            fprintf(stderr, "Error: Failed to read label\n");
-            fclose(file);
-            exit(EXIT_FAILURE);
-        }
-
-        for (int j = 0; j < OUTPUT_SIZE; j++) {
-            labels[i][j] = (j == label) ? 1.0 : 0.0;
-        }
-    }
-    fclose(file);
-    return labels;
-}
-
-
-// Free network memory
-void freeNetwork(NeuralNetwork* net) {
-    freeMatrix(net->W1, HIDDEN_SIZE);
-    freeMatrix(net->W2, OUTPUT_SIZE);
-    free(net->b1);
-    free(net->b2);
-    free(net);
-}
-void freeDeviceNetwork(NeuralNetwork* d_net) {
-    NeuralNetwork h_net;
-    // Copy the structure from device to host
-    cudaMemcpy(&h_net, d_net, sizeof(NeuralNetwork), cudaMemcpyDeviceToHost);
-    
-    // Free individual device allocations using the pointers from h_net
-    cudaFree(h_net.W1); // This frees d_W1
-    cudaFree(h_net.W2); // This frees d_W2
-    cudaFree(h_net.b1); // This frees d_b1
-    cudaFree(h_net.b2); // This frees d_b2
-
-    // Finally, free the device NeuralNetwork struct
-    cudaFree(d_net);
-}
-
+// ---------------------------------------
 // Main function
 int main() {
     printf("MNIST Neural Network\n\n");
 
-    double** H_train_images = loadMNISTImages("../data/train-images.idx3-ubyte", 60000);
-    double** H_train_labels = loadMNISTLabels("../data/train-labels.idx1-ubyte", 60000);
-    double** H_test_images = loadMNISTImages("../data/t10k-images.idx3-ubyte", 10000);
-    double** H_test_labels = loadMNISTLabels("../data/t10k-labels.idx1-ubyte", 10000);
+    // Load training and testing data as contiguous arrays.
+    double* H_train_images = loadMNISTImages("../data/train-images.idx3-ubyte", 60000);
+    double* H_train_labels = loadMNISTLabels("../data/train-labels.idx1-ubyte", 60000);
+    double* H_test_images  = loadMNISTImages("../data/t10k-images.idx3-ubyte", 10000);
+    double* H_test_labels  = loadMNISTLabels("../data/t10k-labels.idx1-ubyte", 10000);
 
-
-
+    // Create network on host.
     NeuralNetwork* net = createNetwork();
-    NeuralNetwork* d_net = allocateDeviceNetwork(net);  //get the network on device.
 
+    // Allocate device memory for weights and biases.
+    double *d_W1, *d_W2, *d_b1, *d_b2;
+    cudaMalloc((void**)&d_W1, HIDDEN_SIZE * INPUT_SIZE * sizeof(double));
+    cudaMalloc((void**)&d_W2, OUTPUT_SIZE * HIDDEN_SIZE * sizeof(double));
+    cudaMalloc((void**)&d_b1, HIDDEN_SIZE * sizeof(double));
+    cudaMalloc((void**)&d_b2, OUTPUT_SIZE * sizeof(double));
 
-    train(d_net, H_train_images, H_train_labels, 60000);
+    // Copy host network weights and biases to device.
+    cudaMemcpy(d_W1, net->W1, HIDDEN_SIZE * INPUT_SIZE * sizeof(double), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_W2, net->W2, OUTPUT_SIZE * HIDDEN_SIZE * sizeof(double), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_b1, net->b1, HIDDEN_SIZE * sizeof(double), cudaMemcpyHostToDevice);
+    cudaMemcpy(d_b2, net->b2, OUTPUT_SIZE * sizeof(double), cudaMemcpyHostToDevice);
 
-    evaluate(d_net, H_test_images, H_test_labels, 10000);
+    // Train the network.
+    train(net, d_W1, d_W2, d_b1, d_b2, H_train_images, H_train_labels, 60000);
 
+    // Evaluate on test data.
+    evaluate(net,d_W1, d_W2, d_b1, d_b2, H_test_images, H_test_labels, 10000);
+
+    // Free host network and data.
     freeNetwork(net);
-    freeDeviceNetwork(d_net);
+    free(H_train_images);
+    free(H_train_labels);
+    free(H_test_images);
+    free(H_test_labels);
+
+    // Free device weights and biases.
+    cudaFree(d_W1);
+    cudaFree(d_W2);
+    cudaFree(d_b1);
+    cudaFree(d_b2);
+
     return 0;
 }
