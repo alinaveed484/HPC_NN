@@ -332,23 +332,57 @@ void train(NeuralNetwork* net,
 
 // ---------------------------------------
 // Evaluate network on test data using serial forward pass.
-void evaluate(NeuralNetwork* net, double* images, double* labels, int numImages) {
+void evaluate(double* images, double* labels, int numImages,
+              double* d_W1, double* d_W2, double* d_b1, double* d_b2) {
+
     int correct = 0;
+    
+    // Allocate device memory for hidden and output layers (for one image).
+    double* D_hidden;
+    double* D_output;
+    cudaMalloc((void**)&D_hidden, HIDDEN_SIZE * sizeof(double));
+    cudaMalloc((void**)&D_output, OUTPUT_SIZE * sizeof(double));
+
+    // For each test image, copy the image to a temporary device buffer,
+    // launch the forward kernel, and then copy back the results.
     for (int i = 0; i < numImages; i++) {
-        double hidden[HIDDEN_SIZE], output[OUTPUT_SIZE];
+        double* d_input;
+        cudaMalloc((void**)&d_input, INPUT_SIZE * sizeof(double));
+        cudaMemcpy(d_input, images + (i * INPUT_SIZE),
+                   INPUT_SIZE * sizeof(double), cudaMemcpyHostToDevice);
         
-        forward(net, images + (i * INPUT_SIZE), hidden, output);
+        // Launch forward kernel.
+        forward_kernel<<<4, 32>>>(d_W1, d_W2, d_b1, d_b2, d_input, D_hidden, D_output);
+        cudaDeviceSynchronize();
         
-        int pred = 0, actual = 0;
+        // Copy the output (activation of the output layer) back to host.
+        double h_output[OUTPUT_SIZE];
+        cudaMemcpy(h_output, D_output, OUTPUT_SIZE * sizeof(double), cudaMemcpyDeviceToHost);
+        
+        // Determine the predicted label (index of max value in h_output).
+        int pred = 0;
+        for (int j = 1; j < OUTPUT_SIZE; j++) {
+            if (h_output[j] > h_output[pred])
+                pred = j;
+        }
+        // Extract the actual label from the contiguous labels array.
+        int actual = 0;
         for (int j = 0; j < OUTPUT_SIZE; j++) {
-            if (output[j] > output[pred]) pred = j;
-            if (labels[i * OUTPUT_SIZE + j] > labels[i * OUTPUT_SIZE + actual]) actual = j;
+            if (labels[i * OUTPUT_SIZE + j] > labels[i * OUTPUT_SIZE + actual])
+                actual = j;
         }
         if (pred == actual)
             correct++;
+        
+        cudaFree(d_input);
     }
-    printf("Test Accuracy: %.2f%%\n", (correct / (double)numImages) * 100);
+    
+    printf("Test Accuracy (GPU Forward): %.2f%%\n", (correct / (double)numImages) * 100);
+    
+    cudaFree(D_hidden);
+    cudaFree(D_output);
 }
+
 
 // ---------------------------------------
 // Main function
@@ -381,8 +415,8 @@ int main() {
     train(net, d_W1, d_W2, d_b1, d_b2, H_train_images, H_train_labels, 60000);
 
     // Evaluate on test data.
-    evaluate(net,d_W1, d_W2, d_b1, d_b2, H_test_images, H_test_labels, 10000);
-
+    evaluate(H_test_images, H_test_labels, 10000, d_W1, d_W2, d_b1, d_b2);
+    
     // Free host network and data.
     freeNetwork(net);
     free(H_train_images);
