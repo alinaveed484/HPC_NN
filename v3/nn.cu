@@ -42,11 +42,18 @@ NeuralNetwork* createNetwork() {
     net->b2 = (double*)calloc(OUTPUT_SIZE, sizeof(double));
 
     srand(777);
-    for (int i = 0; i < HIDDEN_SIZE * INPUT_SIZE; i++)
-        net->W1[i] = ((double)rand() / RAND_MAX) * 0.01;
+    for (int j = 0; j < INPUT_SIZE; j++) {
+        for (int i = 0; i < HIDDEN_SIZE; i++) {
+            net->W1[j * HIDDEN_SIZE + i] = ((double)rand() / RAND_MAX) * 0.01;
+        }
+    }
 
-    for (int i = 0; i < OUTPUT_SIZE * HIDDEN_SIZE; i++)
-        net->W2[i] = ((double)rand() / RAND_MAX) * 0.01;
+    // W2 initialization (HIDDEN_SIZE x OUTPUT_SIZE)
+    for (int j = 0; j < HIDDEN_SIZE; j++) {
+        for (int i = 0; i < OUTPUT_SIZE; i++) {
+            net->W2[j * OUTPUT_SIZE + i] = ((double)rand() / RAND_MAX) * 0.01;
+        }
+    }
     return net;
 }
 
@@ -83,11 +90,11 @@ __global__ void compute_hidden(double* W1, double* b1, double* input, double* hi
     if (i < HIDDEN_SIZE) {
         double sum = b1[i];
         for (int j = 0; j < INPUT_SIZE; j++)
-            sum += W1[i * INPUT_SIZE + j] * input[j];
-        hidden[i] = sum;
+            sum += W1[j * HIDDEN_SIZE + i] * input[j];
+        //hidden[i] = sum;
         
         //this is basically relu function
-        hidden[i] = (hidden[i] > 0) ? hidden[i] : 0;
+        hidden[i] = (sum > 0) ? sum : 0;
     }
 }
 
@@ -97,7 +104,7 @@ __global__ void compute_output(double* W2, double* b2, double* hidden, double* o
     if (i < OUTPUT_SIZE) {
         double sum = b2[i];
         for (int j = 0; j < HIDDEN_SIZE; j++)
-            sum += W2[i * HIDDEN_SIZE + j] * hidden[j];
+            sum += W2[j * OUTPUT_SIZE + i] * hidden[j];
         output[i] = sum;
     }
     __syncthreads();
@@ -122,24 +129,37 @@ __global__ void compute_d_hidden(double* W2, double* d_output, double* hidden, d
     if (i < HIDDEN_SIZE) {
         double sum = 0.0;
         for (int j = 0; j < OUTPUT_SIZE; j++)
-            sum += W2[j * HIDDEN_SIZE + i] * d_output[j];
+            sum += W2[i * OUTPUT_SIZE + j] * d_output[j];
         d_hidden[i] = sum * ((hidden[i] > 0) ? 1.0 : 0.0);
     }
 }
 
 __global__ void update_W2(double* W2, double* d_output, double* hidden, double lr) {
-    int i = blockIdx.x; // Output neuron
-    int j = threadIdx.x; // Hidden neuron
-    if (i < OUTPUT_SIZE && j < HIDDEN_SIZE)
-        W2[i * HIDDEN_SIZE + j] -= lr * d_output[i] * hidden[j];
+
+    int j = threadIdx.x;  // [0, HIDDEN_SIZE)
+    int i = blockIdx.x;   // [0, OUTPUT_SIZE)
+    
+    if (j < HIDDEN_SIZE && i < OUTPUT_SIZE) {
+        // CORRECT TRANSPOSED UPDATE
+        W2[j * OUTPUT_SIZE + i] -= lr * d_output[i] * hidden[j];
+    }
 }
 
 __global__ void update_W1(double* W1, double* d_hidden, double* input, double lr) {
-    int idx = blockIdx.x * blockDim.x + threadIdx.x;
-    int i = idx / INPUT_SIZE;
-    int j = idx % INPUT_SIZE;
-    if (i < HIDDEN_SIZE && j < INPUT_SIZE)
-        W1[i * INPUT_SIZE + j] -= lr * d_hidden[i] * input[j];
+    // int idx = blockIdx.x * blockDim.x + threadIdx.x;
+    // int i = idx / INPUT_SIZE;
+    // int j = idx % INPUT_SIZE;
+    // if (i < HIDDEN_SIZE && j < INPUT_SIZE)
+    //     W1[i * INPUT_SIZE + j] -= lr * d_hidden[i] * input[j];
+
+    int input_idx = blockIdx.x;    // [0, INPUT_SIZE)
+    int hidden_idx = threadIdx.x;  // [0, HIDDEN_SIZE)
+    
+    if (input_idx < INPUT_SIZE && hidden_idx < HIDDEN_SIZE) {
+        // CORRECT TRANSPOSED UPDATE
+        int weight_idx = input_idx * HIDDEN_SIZE + hidden_idx;
+        W1[weight_idx] -= lr * d_hidden[hidden_idx] * input[input_idx];
+    }
 }
 
 __global__ void update_b1(double* b1, double* d_hidden, double lr) {
