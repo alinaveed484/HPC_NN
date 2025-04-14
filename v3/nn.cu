@@ -44,6 +44,7 @@ NeuralNetwork* createNetwork() {
     srand(777);
     for (int i = 0; i < HIDDEN_SIZE * INPUT_SIZE; i++)
         net->W1[i] = ((double)rand() / RAND_MAX) * 0.01;
+
     for (int i = 0; i < OUTPUT_SIZE * HIDDEN_SIZE; i++)
         net->W2[i] = ((double)rand() / RAND_MAX) * 0.01;
     return net;
@@ -213,10 +214,10 @@ void calculateOccupancyFORWARD(int threadsPerBlock, size_t sharedMemBytes, cudaF
     int maxWarps = prop.maxThreadsPerMultiProcessor / 32; // 48 for RTX 3080
     
     // Set function attributes
-    cudaFuncSetCacheConfig(forward_kernel, cacheConfig);
+    cudaFuncSetCacheConfig(compute_hidden, cacheConfig);
     
     // Calculate occupancy
-    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&numBlocks, forward_kernel, threadsPerBlock, sharedMemBytes);
+    cudaOccupancyMaxActiveBlocksPerMultiprocessor(&numBlocks, compute_hidden, threadsPerBlock, sharedMemBytes);
     activeWarps = numBlocks * (threadsPerBlock / 32);
     
     float occupancy = (float)activeWarps / maxWarps;
@@ -234,14 +235,26 @@ void forwardKernelLaunching(double* d_W1, double* d_W2, double* d_b1, double* d_
 }
 
 void backwardKernelLaunching(double* d_W1, double* d_W2, double* d_b1, double* d_b2,double* d_input,double *D_hidden, double* D_output, int grid_hidden,
-                             double* d_label, double *D_d_hidden, double *D_d_output){
+                             double* d_label, double *D_d_hidden, double *D_d_output, cudaStream_t compute_stream, cudaStream_t copy_stream, 
+                             cudaEvent_t copy_event, double* h_output){
 
-    compute_d_output<<<1, OUTPUT_SIZE>>>(D_output, d_label, D_d_output);
-    compute_d_hidden<<<grid_hidden, 256>>>(d_W2, D_d_output, D_hidden, D_d_hidden);
-    update_W2<<<OUTPUT_SIZE, HIDDEN_SIZE>>>(d_W2, D_d_output, D_hidden, LEARNING_RATE);
-    update_W1<<<(HIDDEN_SIZE * INPUT_SIZE + 255) / 256, 256>>>(d_W1, D_d_hidden, d_input, LEARNING_RATE);
-    update_b1<<<grid_hidden, 256>>>(d_b1, D_d_hidden, LEARNING_RATE);
-    update_b2<<<1, OUTPUT_SIZE>>>(d_b2, D_d_output, LEARNING_RATE);
+    //compute_d_output<<<1, OUTPUT_SIZE>>>(D_output, d_label, D_d_output);
+    compute_d_output<<<1, OUTPUT_SIZE, 0, compute_stream>>>(D_output, d_label, D_d_output);
+
+    //Record the event in the compute stream
+    cudaEventRecord(copy_event, compute_stream);
+
+    //In the copy stream, wait for the event and then asynchronously copy D_output to h_output.
+    cudaStreamWaitEvent(copy_stream, copy_event, 0);
+    cudaMemcpyAsync(h_output, D_output, OUTPUT_SIZE * sizeof(double), cudaMemcpyDeviceToHost, copy_stream);
+
+    //In the compute stream, continue with the dependent backward kernels.
+    //Since these are launched in the same stream as compute_d_output, their ordering is guaranteed.
+    compute_d_hidden<<<grid_hidden, 256, 0, compute_stream>>>(d_W2, D_d_output, D_hidden, D_d_hidden);
+    update_W2<<<OUTPUT_SIZE, HIDDEN_SIZE, 0, compute_stream>>>(d_W2, D_d_output, D_hidden, LEARNING_RATE);
+    update_W1<<<(HIDDEN_SIZE * INPUT_SIZE + 255) / 256, 256, 0, compute_stream>>>(d_W1, D_d_hidden, d_input, LEARNING_RATE);
+    update_b1<<<grid_hidden, 256, 0, compute_stream>>>(d_b1, D_d_hidden, LEARNING_RATE);
+    update_b2<<<1, OUTPUT_SIZE, 0, compute_stream>>>(d_b2, D_d_output, LEARNING_RATE);
 }
 
 // Training function
@@ -264,6 +277,20 @@ void train(NeuralNetwork* net, double* d_W1, double* d_W2, double* d_b1, double*
     dim3 grid_hidden((HIDDEN_SIZE + block.x - 1) / block.x);
     dim3 grid_output((OUTPUT_SIZE + block.x - 1) / block.x);
 
+    // - compute_stream: for all backward kernels (ensuring ordering)
+    // - copy_stream: for asynchronous memory copy.
+    cudaStream_t compute_stream, copy_stream;
+    cudaStreamCreate(&compute_stream);
+    cudaStreamCreate(&copy_stream);
+
+    // Create an event to synchronize between the streams.
+    cudaEvent_t copy_event;
+    cudaEventCreate(&copy_event);
+
+    // Allocate pinned host memory for the asynchronous copy.
+    double* h_output;
+    cudaMallocHost(&h_output, OUTPUT_SIZE * sizeof(double));  // Pinned host memory
+    
     clock_t total_start = clock();
     for (int epoch = 0; epoch < EPOCHS; epoch++) {
         clock_t epoch_start = clock();
@@ -279,12 +306,12 @@ void train(NeuralNetwork* net, double* d_W1, double* d_W2, double* d_b1, double*
             cudaDeviceSynchronize();
 
             // Backward Pass
-            backwardKernelLaunching(d_W1,d_W2,d_b1,d_b2,d_input,D_hidden,D_output, grid_hidden.x, d_label, D_d_hidden, D_d_output);
-            cudaDeviceSynchronize();
+            backwardKernelLaunching(d_W1,d_W2,d_b1,d_b2,d_input,D_hidden,D_output, grid_hidden.x, d_label, D_d_hidden, D_d_output,compute_stream, copy_stream, copy_event, h_output);
 
-            // Loss and Accuracy (copied from host)
-            double h_output[OUTPUT_SIZE];
-            cudaMemcpy(h_output, D_output, OUTPUT_SIZE * sizeof(double), cudaMemcpyDeviceToHost);
+            // Synchronize both streams before computing loss/accuracy.
+            cudaStreamSynchronize(copy_stream);
+            
+
             for (int k = 0; k < OUTPUT_SIZE; k++)
                 loss -= H_labels[i * OUTPUT_SIZE + k] * log(h_output[k]);
             int pred = 0, actual = 0;
@@ -293,6 +320,9 @@ void train(NeuralNetwork* net, double* d_W1, double* d_W2, double* d_b1, double*
                 if (H_labels[i * OUTPUT_SIZE + j] > H_labels[i * OUTPUT_SIZE + actual]) actual = j;
             }
             if (pred == actual) correct++;
+            
+            cudaStreamSynchronize(compute_stream);
+
         }
 
         printf("Epoch %d - Loss: %.4f - Acc: %.2f%% - Time: %.3fs\n",

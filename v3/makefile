@@ -1,8 +1,11 @@
-CC = gcc
-CFLAGS = -Wall -O2
+CC = nvcc
+# Architecture-specific flags for NVIDIA GPUs
+# Adjust the architecture flag according to your GPU
+# For example, for NVIDIA Turing architecture, use -arch=sm_75
+CFLAGS = -O2 -arch=sm_86
 
 EXE = nn.exe
-SRC = nn.c
+SRC = nn.cu
 
 all: $(EXE) run
 
