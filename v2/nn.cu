@@ -255,12 +255,6 @@ void train(NeuralNetwork* net, double* d_W1, double* d_W2, double* d_b1, double*
             cudaDeviceSynchronize();
 
             // Backward Pass
-            // compute_d_output<<<1, OUTPUT_SIZE>>>(D_output, d_label, D_d_output);
-            // compute_d_hidden<<<grid_hidden, block>>>(d_W2, D_d_output, D_hidden, D_d_hidden);
-            // update_W2<<<OUTPUT_SIZE, HIDDEN_SIZE>>>(d_W2, D_d_output, D_hidden, LEARNING_RATE);
-            // update_W1<<<(HIDDEN_SIZE * INPUT_SIZE + block.x - 1) / block.x, block>>>(d_W1, D_d_hidden, d_input, LEARNING_RATE);
-            // update_b1<<<grid_hidden, block>>>(d_b1, D_d_hidden, LEARNING_RATE);
-            // update_b2<<<1, OUTPUT_SIZE>>>(d_b2, D_d_output, LEARNING_RATE);
             backwardKernelLaunching(d_W1,d_W2,d_b1,d_b2,d_input,D_hidden,D_output, grid_hidden.x, d_label, D_d_hidden, D_d_output);
             cudaDeviceSynchronize();
 
