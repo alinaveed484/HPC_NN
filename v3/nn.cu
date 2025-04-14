@@ -86,11 +86,21 @@ __device__ void kernelsoftmax(double* x, int size) {
 
 // Forward Kernels
 __global__ void compute_hidden(double* W1, double* b1, double* input, double* hidden) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+    extern __shared__ double s_input[];
+    int tid = threadIdx.x;
+    int i = blockIdx.x * blockDim.x + tid;
+
+    // Load input into shared memory
+    for (int j = tid; j < INPUT_SIZE; j += blockDim.x) {
+        s_input[j] = input[j];
+    }
+    __syncthreads();
+
     if (i < HIDDEN_SIZE) {
         double sum = b1[i];
         for (int j = 0; j < INPUT_SIZE; j++)
-            sum += W1[j * HIDDEN_SIZE + i] * input[j];
+            sum += W1[j * HIDDEN_SIZE + i] * s_input[j];
         //hidden[i] = sum;
         
         //this is basically relu function
@@ -100,11 +110,21 @@ __global__ void compute_hidden(double* W1, double* b1, double* input, double* hi
 
 
 __global__ void compute_output(double* W2, double* b2, double* hidden, double* output) {
-    int i = blockIdx.x * blockDim.x + threadIdx.x;
+
+    extern __shared__ double s_hidden[];
+    int tid = threadIdx.x;
+    int i = blockIdx.x * blockDim.x + tid;
+
+    // Load hidden layer into shared memory
+    if (tid < HIDDEN_SIZE) {
+        s_hidden[tid] = hidden[tid];
+    }
+    __syncthreads();
+
     if (i < OUTPUT_SIZE) {
         double sum = b2[i];
         for (int j = 0; j < HIDDEN_SIZE; j++)
-            sum += W2[j * OUTPUT_SIZE + i] * hidden[j];
+            sum += W2[j * OUTPUT_SIZE + i] * s_hidden[j];
         output[i] = sum;
     }
     __syncthreads();
@@ -249,9 +269,10 @@ void calculateOccupancyFORWARD(int threadsPerBlock, size_t sharedMemBytes, cudaF
     printf("Theoretical occupancy: %.2f%%\n\n", occupancy * 100);
 }
 
-void forwardKernelLaunching(double* d_W1, double* d_W2, double* d_b1, double* d_b2,double* d_input,double *D_hidden, double* D_output, int grid_hidden, int grid_output){
-    compute_hidden<<<grid_hidden, 256>>>(d_W1, d_b1, d_input, D_hidden);
-    compute_output<<<grid_output, 256>>>(d_W2, d_b2, D_hidden, D_output);
+void forwardKernelLaunching(double* d_W1, double* d_W2, double* d_b1, double* d_b2,double* d_input,double *D_hidden, double* D_output, int grid_hidden, int grid_output,
+                            int sharedMemINPUT, int sharedMemHIDDEN){
+    compute_hidden<<<grid_hidden, 256, sharedMemINPUT>>>(d_W1, d_b1, d_input, D_hidden);
+    compute_output<<<grid_output, 256, sharedMemHIDDEN>>>(d_W2, d_b2, D_hidden, D_output);
 }
 
 void backwardKernelLaunching(double* d_W1, double* d_W2, double* d_b1, double* d_b2,double* d_input,double *D_hidden, double* D_output, int grid_hidden,
@@ -311,6 +332,9 @@ void train(NeuralNetwork* net, double* d_W1, double* d_W2, double* d_b1, double*
     double* h_output;
     cudaMallocHost(&h_output, OUTPUT_SIZE * sizeof(double));  // Pinned host memory
     
+    int sharedMemINPUT = INPUT_SIZE*sizeof(double);
+    int sharedMemHidden = HIDDEN_SIZE*sizeof(double);
+
     clock_t total_start = clock();
     for (int epoch = 0; epoch < EPOCHS; epoch++) {
         clock_t epoch_start = clock();
@@ -322,7 +346,7 @@ void train(NeuralNetwork* net, double* d_W1, double* d_W2, double* d_b1, double*
             double* d_label = D_labels + i * OUTPUT_SIZE;
 
             // Forward Pass
-            forwardKernelLaunching(d_W1,d_W2,d_b1,d_b2,d_input,D_hidden,D_output, grid_hidden.x,grid_output.x);
+            forwardKernelLaunching(d_W1,d_W2,d_b1,d_b2,d_input,D_hidden,D_output, grid_hidden.x,grid_output.x, sharedMemINPUT, sharedMemHidden);
             cudaDeviceSynchronize();
 
             // Backward Pass
@@ -367,14 +391,15 @@ void evaluate(double* images, double* labels, int numImages, double* d_W1, doubl
     dim3 block(256);
     dim3 grid_hidden((HIDDEN_SIZE + block.x - 1) / block.x);
     dim3 grid_output((OUTPUT_SIZE + block.x - 1) / block.x);
-
+    int sharedMemINPUT = INPUT_SIZE*sizeof(double);
+    int sharedMemHidden = HIDDEN_SIZE*sizeof(double);
     int correct = 0;
     for (int i = 0; i < numImages; i++) {
         double* d_input;
         cudaMalloc(&d_input, INPUT_SIZE * sizeof(double));
         cudaMemcpy(d_input, images + i * INPUT_SIZE, INPUT_SIZE * sizeof(double), cudaMemcpyHostToDevice);
 
-        forwardKernelLaunching(d_W1,d_W2,d_b1,d_b2,d_input,D_hidden,D_output, grid_hidden.x,grid_output.x);
+        forwardKernelLaunching(d_W1,d_W2,d_b1,d_b2,d_input,D_hidden,D_output, grid_hidden.x,grid_output.x,sharedMemINPUT,sharedMemHidden);
         cudaDeviceSynchronize();
 
         double h_output[OUTPUT_SIZE];

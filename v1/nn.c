@@ -67,7 +67,7 @@ NeuralNetwork* createNetwork() {
     net->b1 = (double*)calloc(HIDDEN_SIZE, sizeof(double));
     net->b2 = (double*)calloc(OUTPUT_SIZE, sizeof(double));
 
-    srand(time(NULL));
+    srand(777);
     for (int i = 0; i < HIDDEN_SIZE; i++)
         for (int j = 0; j < INPUT_SIZE; j++)
             net->W1[i][j] = ((double)rand() / RAND_MAX) * 0.01;
