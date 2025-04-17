@@ -373,9 +373,7 @@ void train(NeuralNetwork* net, double* d_W1, double* d_W2, double* d_b1, double*
             // Synchronize both streams before computing loss/accuracy.
             cudaStreamSynchronize(copy_stream);
             cudaEventRecord(b_stop, compute_stream);
-            cudaEventSynchronize(b_stop);
-            cudaEventElapsedTime(&bt, b_start, b_stop);
-            {
+            cudaEventSynchronize(b_stop);            {
                 float ms;
                 cudaEventElapsedTime(&ms, b_start, b_stop);
                 backward_ms += ms;
