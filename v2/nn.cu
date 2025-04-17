@@ -204,19 +204,19 @@ double* loadMNISTLabels(const char* filename, int numLabels) {
     return labels;
 }
 
-void forwardKernelLaunching(double* d_W1, double* d_W2, double* d_b1, double* d_b2,double* d_input,double *D_hidden, double* D_output, int grid_hidden, int grid_output){
-    compute_hidden<<<grid_hidden, 256>>>(d_W1, d_b1, d_input, D_hidden);
-    compute_output<<<grid_output, 256>>>(d_W2, d_b2, D_hidden, D_output);
+void forwardKernelLaunching(double* d_W1, double* d_W2, double* d_b1, double* d_b2,double* d_input,double *D_hidden, double* D_output){
+    compute_hidden<<<4, 32>>>(d_W1, d_b1, d_input, D_hidden);
+    compute_output<<<1, 10>>>(d_W2, d_b2, D_hidden, D_output);
 }
 
-void backwardKernelLaunching(double* d_W1, double* d_W2, double* d_b1, double* d_b2,double* d_input,double *D_hidden, double* D_output, int grid_hidden,
+void backwardKernelLaunching(double* d_W1, double* d_W2, double* d_b1, double* d_b2,double* d_input,double *D_hidden, double* D_output,
                              double* d_label, double *D_d_hidden, double *D_d_output){
 
     compute_d_output<<<1, OUTPUT_SIZE>>>(D_output, d_label, D_d_output);
-    compute_d_hidden<<<grid_hidden, 256>>>(d_W2, D_d_output, D_hidden, D_d_hidden);
+    compute_d_hidden<<<32, 128>>>(d_W2, D_d_output, D_hidden, D_d_hidden);
     update_W2<<<OUTPUT_SIZE, HIDDEN_SIZE>>>(d_W2, D_d_output, D_hidden, LEARNING_RATE);
     update_W1<<<(HIDDEN_SIZE * INPUT_SIZE + 255) / 256, 256>>>(d_W1, D_d_hidden, d_input, LEARNING_RATE);
-    update_b1<<<grid_hidden, 256>>>(d_b1, D_d_hidden, LEARNING_RATE);
+    update_b1<<<32, 128>>>(d_b1, D_d_hidden, LEARNING_RATE);
     update_b2<<<1, OUTPUT_SIZE>>>(d_b2, D_d_output, LEARNING_RATE);
 }
 
@@ -263,7 +263,7 @@ void train(NeuralNetwork* net, double* d_W1, double* d_W2, double* d_b1, double*
 
             cudaEventRecord(f_start);
             // Forward Pass kernel launching
-            forwardKernelLaunching(d_W1,d_W2,d_b1,d_b2,d_input,D_hidden,D_output, grid_hidden.x,grid_output.x);
+            forwardKernelLaunching(d_W1,d_W2,d_b1,d_b2,d_input,D_hidden,D_output);
             cudaEventRecord(f_stop);
             cudaDeviceSynchronize();
             {
@@ -275,7 +275,7 @@ void train(NeuralNetwork* net, double* d_W1, double* d_W2, double* d_b1, double*
 
             cudaEventRecord(b_start);
             // Backward Pass kernel launching
-            backwardKernelLaunching(d_W1,d_W2,d_b1,d_b2,d_input,D_hidden,D_output, grid_hidden.x, d_label, D_d_hidden, D_d_output);
+            backwardKernelLaunching(d_W1,d_W2,d_b1,d_b2,d_input,D_hidden,D_output, d_label, D_d_hidden, D_d_output);
             cudaEventRecord(b_stop);
             cudaDeviceSynchronize();
             {
@@ -327,7 +327,7 @@ void evaluate(double* images, double* labels, int numImages, double* d_W1, doubl
         cudaMalloc(&d_input, INPUT_SIZE * sizeof(double));
         cudaMemcpy(d_input, images + i * INPUT_SIZE, INPUT_SIZE * sizeof(double), cudaMemcpyHostToDevice);
 
-        forwardKernelLaunching(d_W1,d_W2,d_b1,d_b2,d_input,D_hidden,D_output, grid_hidden.x,grid_output.x);
+        forwardKernelLaunching(d_W1,d_W2,d_b1,d_b2,d_input,D_hidden,D_output);
         cudaDeviceSynchronize();
 
         double h_output[OUTPUT_SIZE];

@@ -269,13 +269,13 @@ void calculateOccupancyFORWARD(int threadsPerBlock, size_t sharedMemBytes, cudaF
     printf("Theoretical occupancy: %.2f%%\n\n", occupancy * 100);
 }
 
-void forwardKernelLaunching(double* d_W1, double* d_W2, double* d_b1, double* d_b2,double* d_input,double *D_hidden, double* D_output, int grid_hidden, int grid_output,
+void forwardKernelLaunching(double* d_W1, double* d_W2, double* d_b1, double* d_b2,double* d_input,double *D_hidden, double* D_output,
                             int sharedMemINPUT, int sharedMemHIDDEN){
-    compute_hidden<<<grid_hidden, 256, sharedMemINPUT>>>(d_W1, d_b1, d_input, D_hidden);
-    compute_output<<<grid_output, 256, sharedMemHIDDEN>>>(d_W2, d_b2, D_hidden, D_output);
+    compute_hidden<<<4, 128, sharedMemINPUT>>>(d_W1, d_b1, d_input, D_hidden);
+    compute_output<<<4, 128, sharedMemHIDDEN>>>(d_W2, d_b2, D_hidden, D_output);
 }
 
-void backwardKernelLaunching(double* d_W1, double* d_W2, double* d_b1, double* d_b2,double* d_input,double *D_hidden, double* D_output, int grid_hidden,
+void backwardKernelLaunching(double* d_W1, double* d_W2, double* d_b1, double* d_b2,double* d_input,double *D_hidden, double* D_output,
                              double* d_label, double *D_d_hidden, double *D_d_output, cudaStream_t compute_stream, cudaStream_t copy_stream, 
                              cudaEvent_t copy_event, double* h_output){
 
@@ -291,10 +291,10 @@ void backwardKernelLaunching(double* d_W1, double* d_W2, double* d_b1, double* d
 
     //In the compute stream, continue with the dependent backward kernels.
     //Since these are launched in the same stream as compute_d_output, their ordering is guaranteed.
-    compute_d_hidden<<<grid_hidden, 256, 0, compute_stream>>>(d_W2, D_d_output, D_hidden, D_d_hidden);
+    compute_d_hidden<<<4, 32, 0, compute_stream>>>(d_W2, D_d_output, D_hidden, D_d_hidden);
     update_W2<<<OUTPUT_SIZE, HIDDEN_SIZE, 0, compute_stream>>>(d_W2, D_d_output, D_hidden, LEARNING_RATE);
     update_W1<<<(HIDDEN_SIZE * INPUT_SIZE + 255) / 256, 256, 0, compute_stream>>>(d_W1, D_d_hidden, d_input, LEARNING_RATE);
-    update_b1<<<grid_hidden, 256, 0, compute_stream>>>(d_b1, D_d_hidden, LEARNING_RATE);
+    update_b1<<<4, 128, 0, compute_stream>>>(d_b1, D_d_hidden, LEARNING_RATE);
     update_b2<<<1, OUTPUT_SIZE, 0, compute_stream>>>(d_b2, D_d_output, LEARNING_RATE);
 }
 
@@ -357,7 +357,7 @@ void train(NeuralNetwork* net, double* d_W1, double* d_W2, double* d_b1, double*
 
             // Forward Pass
             cudaEventRecord(f_start, 0);
-            forwardKernelLaunching(d_W1,d_W2,d_b1,d_b2,d_input,D_hidden,D_output, grid_hidden.x,grid_output.x, sharedMemINPUT, sharedMemHidden);
+            forwardKernelLaunching(d_W1,d_W2,d_b1,d_b2,d_input,D_hidden,D_output, sharedMemINPUT, sharedMemHidden);
             cudaEventRecord(f_stop, 0);
             cudaDeviceSynchronize();
             {
@@ -368,7 +368,7 @@ void train(NeuralNetwork* net, double* d_W1, double* d_W2, double* d_b1, double*
 
             cudaEventRecord(b_start, compute_stream);
             // Backward Pass
-            backwardKernelLaunching(d_W1,d_W2,d_b1,d_b2,d_input,D_hidden,D_output, grid_hidden.x, d_label, D_d_hidden, D_d_output,compute_stream, copy_stream, copy_event, h_output);
+            backwardKernelLaunching(d_W1,d_W2,d_b1,d_b2,d_input,D_hidden,D_output, d_label, D_d_hidden, D_d_output,compute_stream, copy_stream, copy_event, h_output);
 
             // Synchronize both streams before computing loss/accuracy.
             cudaStreamSynchronize(copy_stream);
@@ -422,7 +422,7 @@ void evaluate(double* images, double* labels, int numImages, double* d_W1, doubl
         cudaMalloc(&d_input, INPUT_SIZE * sizeof(double));
         cudaMemcpy(d_input, images + i * INPUT_SIZE, INPUT_SIZE * sizeof(double), cudaMemcpyHostToDevice);
 
-        forwardKernelLaunching(d_W1,d_W2,d_b1,d_b2,d_input,D_hidden,D_output, grid_hidden.x,grid_output.x,sharedMemINPUT,sharedMemHidden);
+        forwardKernelLaunching(d_W1,d_W2,d_b1,d_b2,d_input,D_hidden,D_output, sharedMemINPUT,sharedMemHidden);
         cudaDeviceSynchronize();
 
         double h_output[OUTPUT_SIZE];
