@@ -135,11 +135,19 @@ void train(NeuralNetwork* net, double** images, double** labels, int numImages) 
         clock_t epoch_start = clock();
         double loss = 0.0;
         int correct = 0;
+        double forward_time = 0.0, backward_time = 0.0;
 
         for (int i = 0; i < numImages; i++) {
             double hidden[HIDDEN_SIZE], output[OUTPUT_SIZE];
+
+            clock_t f_start = clock();
+
             forward(net, images[i], hidden, output);
+            forward_time += get_time(f_start);
+
+            clock_t b_start = clock();
             backward(net, images[i], hidden, output, labels[i]);
+            backward_time += get_time(b_start);
 
             // Compute loss & accuracy
             for (int k = 0; k < OUTPUT_SIZE; k++) loss -= labels[i][k] * log(output[k]);
@@ -151,8 +159,8 @@ void train(NeuralNetwork* net, double** images, double** labels, int numImages) 
             if (pred == actual) correct++;
         }
 
-        printf("Epoch %d - Loss: %.4f - Train Accuracy: %.2f%% - Time: %.3fs\n",
-               epoch + 1, loss / numImages, (correct / (double)numImages) * 100, get_time(epoch_start));
+        printf("Epoch %d - Loss: %.4f - Train Accuracy: %.2f%% - Time: %.3fs - (FWD: %.3fs, BWD: %.3fs)\n",
+               epoch + 1, loss / numImages, (correct / (double)numImages) * 100, get_time(epoch_start), forward_time, backward_time);
     }
     printf("Total training time: %.3fs\n", get_time(total_start));
 }

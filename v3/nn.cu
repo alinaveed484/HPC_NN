@@ -318,6 +318,15 @@ void train(NeuralNetwork* net, double* d_W1, double* d_W2, double* d_b1, double*
     dim3 grid_hidden((HIDDEN_SIZE + block.x - 1) / block.x);
     dim3 grid_output((OUTPUT_SIZE + block.x - 1) / block.x);
 
+    cudaEvent_t f_start, f_stop, b_start, b_stop;
+    cudaEventCreate(&f_start);
+    cudaEventCreate(&f_stop);
+    // bind backward events to compute_stream so they measure only GPU work,
+    // not host synchronization
+    cudaEventCreateWithFlags(&b_start, cudaEventBlockingSync);
+    cudaEventCreateWithFlags(&b_stop , cudaEventBlockingSync);
+    float forward_ms = 0.0f, backward_ms = 0.0f;
+
     // - compute_stream: for all backward kernels (ensuring ordering)
     // - copy_stream: for asynchronous memory copy.
     cudaStream_t compute_stream, copy_stream;
@@ -340,21 +349,37 @@ void train(NeuralNetwork* net, double* d_W1, double* d_W2, double* d_b1, double*
         clock_t epoch_start = clock();
         double loss = 0.0;
         int correct = 0;
+        forward_ms = backward_ms = 0.0f;
 
         for (int i = 0; i < numImages; i++) {
             double* d_input = D_images + i * INPUT_SIZE;
             double* d_label = D_labels + i * OUTPUT_SIZE;
 
             // Forward Pass
+            cudaEventRecord(f_start, 0);
             forwardKernelLaunching(d_W1,d_W2,d_b1,d_b2,d_input,D_hidden,D_output, grid_hidden.x,grid_output.x, sharedMemINPUT, sharedMemHidden);
+            cudaEventRecord(f_stop, 0);
             cudaDeviceSynchronize();
+            {
+                float ms;
+                cudaEventElapsedTime(&ms, f_start, f_stop);
+                forward_ms += ms;
+            }
 
+            cudaEventRecord(b_start, compute_stream);
             // Backward Pass
             backwardKernelLaunching(d_W1,d_W2,d_b1,d_b2,d_input,D_hidden,D_output, grid_hidden.x, d_label, D_d_hidden, D_d_output,compute_stream, copy_stream, copy_event, h_output);
 
             // Synchronize both streams before computing loss/accuracy.
             cudaStreamSynchronize(copy_stream);
-            
+            cudaEventRecord(b_stop, compute_stream);
+            cudaEventSynchronize(b_stop);
+            cudaEventElapsedTime(&bt, b_start, b_stop);
+            {
+                float ms;
+                cudaEventElapsedTime(&ms, b_start, b_stop);
+                backward_ms += ms;
+            }
 
             for (int k = 0; k < OUTPUT_SIZE; k++)
                 loss -= H_labels[i * OUTPUT_SIZE + k] * log(h_output[k]);
@@ -369,8 +394,8 @@ void train(NeuralNetwork* net, double* d_W1, double* d_W2, double* d_b1, double*
 
         }
 
-        printf("Epoch %d - Loss: %.4f - Acc: %.2f%% - Time: %.3fs\n",
-               epoch + 1, loss / numImages, (correct * 100.0) / numImages, get_time(epoch_start));
+        printf("Epoch %d - Loss: %.4f - Acc: %.2f%% - Time: %.3fs - (FWD: %.3fs, BWD: %.3fs)\n",
+               epoch + 1, loss / numImages, (correct * 100.0) / numImages, get_time(epoch_start), forward_ms/1000, backward_ms/1000);
     }
     printf("Total Time: %.3fs\n", get_time(total_start));
 

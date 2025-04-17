@@ -240,27 +240,54 @@ void train(NeuralNetwork* net, double* d_W1, double* d_W2, double* d_b1, double*
     dim3 grid_hidden((HIDDEN_SIZE + block.x - 1) / block.x);
     dim3 grid_output((OUTPUT_SIZE + block.x - 1) / block.x);
 
+
+    cudaEvent_t f_start, f_stop, b_start, b_stop;
+    cudaEventCreate(&f_start);
+    cudaEventCreate(&f_stop);
+    cudaEventCreate(&b_start);
+    cudaEventCreate(&b_stop);
+    float forward_ms = 0.0f, backward_ms = 0.0f;
+
+
+
     clock_t total_start = clock();
     for (int epoch = 0; epoch < EPOCHS; epoch++) {
         clock_t epoch_start = clock();
         double loss = 0.0;
         int correct = 0;
+        forward_ms = backward_ms = 0.0f;
 
         for (int i = 0; i < numImages; i++) {
             double* d_input = D_images + i * INPUT_SIZE;
             double* d_label = D_labels + i * OUTPUT_SIZE;
 
-            // Forward Pass
+            cudaEventRecord(f_start);
+            // Forward Pass kernel launching
             forwardKernelLaunching(d_W1,d_W2,d_b1,d_b2,d_input,D_hidden,D_output, grid_hidden.x,grid_output.x);
+            cudaEventRecord(f_stop);
             cudaDeviceSynchronize();
+            {
+                float ms;
+                cudaEventElapsedTime(&ms, f_start, f_stop);
+                forward_ms += ms;
+            }
 
-            // Backward Pass
+
+            cudaEventRecord(b_start);
+            // Backward Pass kernel launching
             backwardKernelLaunching(d_W1,d_W2,d_b1,d_b2,d_input,D_hidden,D_output, grid_hidden.x, d_label, D_d_hidden, D_d_output);
+            cudaEventRecord(b_stop);
             cudaDeviceSynchronize();
+            {
+                float ms;
+                cudaEventElapsedTime(&ms, b_start, b_stop);
+                backward_ms += ms;
+            }
 
             // Loss and Accuracy (copied from host)
             double h_output[OUTPUT_SIZE];
             cudaMemcpy(h_output, D_output, OUTPUT_SIZE * sizeof(double), cudaMemcpyDeviceToHost);
+
             for (int k = 0; k < OUTPUT_SIZE; k++)
                 loss -= H_labels[i * OUTPUT_SIZE + k] * log(h_output[k]);
             int pred = 0, actual = 0;
@@ -271,8 +298,8 @@ void train(NeuralNetwork* net, double* d_W1, double* d_W2, double* d_b1, double*
             if (pred == actual) correct++;
         }
 
-        printf("Epoch %d - Loss: %.4f - Acc: %.2f%% - Time: %.3fs\n",
-               epoch + 1, loss / numImages, (correct * 100.0) / numImages, get_time(epoch_start));
+        printf("Epoch %d - Loss: %.4f - Acc: %.2f%% - Time: %.3fs - (FWD: %.3fs, BWD: %.3fs)\n",
+               epoch + 1, loss / numImages, (correct * 100.0) / numImages, get_time(epoch_start), forward_ms/1000, backward_ms/1000);
     }
     printf("Total Time: %.3fs\n", get_time(total_start));
 
