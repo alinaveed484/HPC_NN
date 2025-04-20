@@ -349,10 +349,10 @@ void evaluate(double* images, double* labels, int numImages, double* d_W1, doubl
 
 // Main function (same as before with added CUDA allocations)
 int main() {
-    double* H_train_images = loadMNISTImages("../data/train-images.idx3-ubyte", 60000);
-    double* H_train_labels = loadMNISTLabels("../data/train-labels.idx1-ubyte", 60000);
-    double* H_test_images = loadMNISTImages("../data/t10k-images.idx3-ubyte", 10000);
-    double* H_test_labels = loadMNISTLabels("../data/t10k-labels.idx1-ubyte", 10000);
+    double* H_train_images = loadMNISTImages("../../data/train-images.idx3-ubyte", 60000);
+    double* H_train_labels = loadMNISTLabels("../../data/train-labels.idx1-ubyte", 60000);
+    double* H_test_images = loadMNISTImages("../../data/t10k-images.idx3-ubyte", 10000);
+    double* H_test_labels = loadMNISTLabels("../../data/t10k-labels.idx1-ubyte", 10000);
 
     NeuralNetwork* net = createNetwork();
 

@@ -409,10 +409,10 @@ void evaluate(float* images, float* labels, int numImages,
 }
 
 int main() {
-    float* H_train_images = loadMNISTImages("../data/train-images.idx3-ubyte", 60000);
-    float* H_train_labels = loadMNISTLabels("../data/train-labels.idx1-ubyte", 60000);
-    float* H_test_images = loadMNISTImages("../data/t10k-images.idx3-ubyte", 10000);
-    float* H_test_labels = loadMNISTLabels("../data/t10k-labels.idx1-ubyte", 10000);
+    float* H_train_images = loadMNISTImages("../../data/train-images.idx3-ubyte", 60000);
+    float* H_train_labels = loadMNISTLabels("../../data/train-labels.idx1-ubyte", 60000);
+    float* H_test_images = loadMNISTImages("../../data/t10k-images.idx3-ubyte", 10000);
+    float* H_test_labels = loadMNISTLabels("../../data/t10k-labels.idx1-ubyte", 10000);
 
     NeuralNetwork* net = createNetwork();
 
