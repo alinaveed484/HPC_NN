@@ -256,7 +256,11 @@ void train(NeuralNetwork* net, float* d_W1, float* d_W2, float* d_b1, float* d_b
             CUDA_CHECK(cudaGetLastError());
             CUDA_CHECK(cudaEventRecord(f_stop, compute_stream));
             CUDA_CHECK(cudaEventSynchronize(f_stop));
-            cudaEventElapsedTime(&forward_ms, f_start, f_stop);
+            {
+                float ms;
+                cudaEventElapsedTime(&ms, f_start, f_stop);
+                forward_ms += ms;
+            }
 
             // Backward Pass
             CUDA_CHECK(cudaEventRecord(b_start, compute_stream));
@@ -284,7 +288,11 @@ void train(NeuralNetwork* net, float* d_W1, float* d_W2, float* d_b1, float* d_b
             CUDA_CHECK(cudaEventRecord(b_stop, compute_stream));
             CUDA_CHECK(cudaStreamSynchronize(compute_stream));
             CUDA_CHECK(cudaStreamSynchronize(copy_stream));
-            cudaEventElapsedTime(&backward_ms, b_start, b_stop);
+            {
+                float ms;
+                cudaEventElapsedTime(&ms, b_start, b_stop);
+                backward_ms += ms;
+            }
 
             // Loss and accuracy
             CUDA_CHECK(cudaStreamSynchronize(copy_stream));
@@ -320,51 +328,82 @@ void train(NeuralNetwork* net, float* d_W1, float* d_W2, float* d_b1, float* d_b
     CUDA_CHECK(cudaEventDestroy(b_start));
     CUDA_CHECK(cudaEventDestroy(b_stop));
 }
+void evaluate(float* images, float* labels, int numImages,
+              float* d_W1, float* d_W2, float* d_b1, float* d_b2,
+              cublasHandle_t handle) {
+    float *D_images = NULL, *D_hidden = NULL, *D_output = NULL;
+    float alpha = 1.0f, beta = 0.0f;
+    int correct = 0;
+    float h_output[OUTPUT_SIZE];
 
-// Evaluation function
-void evaluate(float* images, float* labels, int numImages, float* d_W1, float* d_W2,
-              float* d_b1, float* d_b2, cublasHandle_t handle) {
-    float *D_hidden, *D_output;
+    // Copy all test images to the device once
+    CUDA_CHECK(cudaMalloc(&D_images, numImages * INPUT_SIZE * sizeof(float)));
+    CUDA_CHECK(cudaMemcpy(D_images,
+                          images,
+                          numImages * INPUT_SIZE * sizeof(float),
+                          cudaMemcpyHostToDevice));
+
+    // Allocate space for one hidden‐layer activation and one output activation
     CUDA_CHECK(cudaMalloc(&D_hidden, HIDDEN_SIZE * sizeof(float)));
     CUDA_CHECK(cudaMalloc(&D_output, OUTPUT_SIZE * sizeof(float)));
 
-    float alpha = 1.0f, beta = 0.0f;
-    int correct = 0;
+    // Ensure cuBLAS ops run on the default stream
+    CUBLAS_CHECK(cublasSetStream(handle, 0));
 
-    for (int i = 0; i < numImages; i++) {
-        float* d_input;
-        CUDA_CHECK(cudaMalloc(&d_input, INPUT_SIZE * sizeof(float)));
-        CUDA_CHECK(cudaMemcpy(d_input, images + i * INPUT_SIZE, INPUT_SIZE * sizeof(float),
-                              cudaMemcpyHostToDevice));
+    for (int i = 0; i < numImages; ++i) {
+        // Point to the i-th image on the device
+        float* d_input = D_images + i * INPUT_SIZE;
 
-        CUBLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,
-                                 HIDDEN_SIZE, 1, INPUT_SIZE,
-                                 &alpha, d_W1, HIDDEN_SIZE, d_input, INPUT_SIZE,
-                                 &beta, D_hidden, HIDDEN_SIZE));
-        add_bias_and_relu<<<(HIDDEN_SIZE + 255)/256, 256>>>(D_hidden, d_b1, HIDDEN_SIZE);
+        // --- Forward pass: input → hidden ---
+        CUBLAS_CHECK(
+            cublasSgemm(handle,
+                        CUBLAS_OP_N, CUBLAS_OP_N,
+                        HIDDEN_SIZE, 1, INPUT_SIZE,
+                        &alpha,
+                        d_W1, HIDDEN_SIZE,
+                        d_input, INPUT_SIZE,
+                        &beta,
+                        D_hidden, HIDDEN_SIZE)
+        );
+        add_bias_and_relu<<<(HIDDEN_SIZE + 255) / 256, 256>>>(D_hidden, d_b1, HIDDEN_SIZE);
         CUDA_CHECK(cudaGetLastError());
-        CUBLAS_CHECK(cublasSgemm(handle, CUBLAS_OP_N, CUBLAS_OP_N,
-                                 OUTPUT_SIZE, 1, HIDDEN_SIZE,
-                                 &alpha, d_W2, OUTPUT_SIZE, D_hidden, HIDDEN_SIZE,
-                                 &beta, D_output, OUTPUT_SIZE));
+
+        // --- Forward pass: hidden → output ---
+        CUBLAS_CHECK(
+            cublasSgemm(handle,
+                        CUBLAS_OP_N, CUBLAS_OP_N,
+                        OUTPUT_SIZE, 1, HIDDEN_SIZE,
+                        &alpha,
+                        d_W2, OUTPUT_SIZE,
+                        D_hidden, HIDDEN_SIZE,
+                        &beta,
+                        D_output, OUTPUT_SIZE)
+        );
         add_bias_and_softmax<<<1, OUTPUT_SIZE>>>(D_output, d_b2, OUTPUT_SIZE);
         CUDA_CHECK(cudaGetLastError());
         CUDA_CHECK(cudaDeviceSynchronize());
 
-        float h_output[OUTPUT_SIZE];
-        CUDA_CHECK(cudaMemcpy(h_output, D_output, OUTPUT_SIZE * sizeof(float),
+        // Copy the output probabilities back to host
+        CUDA_CHECK(cudaMemcpy(h_output,
+                              D_output,
+                              OUTPUT_SIZE * sizeof(float),
                               cudaMemcpyDeviceToHost));
 
+        // Compute prediction vs. ground truth
         int pred = 0, actual = 0;
-        for (int j = 0; j < OUTPUT_SIZE; j++) {
-            if (h_output[j] > h_output[pred]) pred = j;
-            if (labels[i * OUTPUT_SIZE + j] > labels[i * OUTPUT_SIZE + actual]) actual = j;
+        for (int j = 1; j < OUTPUT_SIZE; ++j) {
+            if (h_output[j] > h_output[pred])       pred = j;
+            if (labels[i * OUTPUT_SIZE + j] >
+                labels[i * OUTPUT_SIZE + actual])   actual = j;
         }
-        if (pred == actual) correct++;
-        CUDA_CHECK(cudaFree(d_input));
+        if (pred == actual) ++correct;
     }
 
-    printf("Test Acc: %.2f%%\n", (correct * 100.0f) / numImages);
+    printf("Test Accuracy: %.2f%%\n",
+           (correct * 100.0f) / (float)numImages);
+
+    // Clean up
+    CUDA_CHECK(cudaFree(D_images));
     CUDA_CHECK(cudaFree(D_hidden));
     CUDA_CHECK(cudaFree(D_output));
 }
