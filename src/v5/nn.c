@@ -67,7 +67,8 @@ void forward(NeuralNetwork* net, double* in, double* hidden, double* out) {
     for (int i = 0; i < HIDDEN_SIZE; i++) {
         double sum = net->b1[i];
         for (int j = 0; j < INPUT_SIZE; j++) sum += net->W1[i * INPUT_SIZE + j] * in[j];
-        hidden[i] = sum;
+       // hidden[i] = sum;
+        hidden[i] = (sum > 0 ? sum : 0); // ReLU merged here
     }
     relu(hidden, HIDDEN_SIZE);
 
@@ -79,75 +80,71 @@ void forward(NeuralNetwork* net, double* in, double* hidden, double* out) {
     }
     softmax(out, OUTPUT_SIZE);
 }
-
 // Backpropagation (device)
-void backward(NeuralNetwork* net, double* in, double* hidden, double* out, double* tgt) {
+void backward(NeuralNetwork* net, double* in, double* hidden, double* out, double* tgt, double* d_out, double* d_hid) {
     int i, j;
-    #pragma acc parallel present(net, net->W1[0:HIDDEN_SIZE*INPUT_SIZE], net->W2[0:OUTPUT_SIZE*HIDDEN_SIZE], \
-                                  net->b1[0:HIDDEN_SIZE], net->b2[0:OUTPUT_SIZE], \
-                                  in[0:INPUT_SIZE], hidden[0:HIDDEN_SIZE], out[0:OUTPUT_SIZE], tgt[0:OUTPUT_SIZE])
-    {
-        double d_out[OUTPUT_SIZE];
-        double d_hid[HIDDEN_SIZE];
 
-        // output gradient
-        #pragma acc loop
-        for (i = 0; i < OUTPUT_SIZE; i++) {
-            d_out[i] = out[i] - tgt[i];
-        }
-
-        // hidden gradient
-        #pragma acc loop
-        for (i = 0; i < HIDDEN_SIZE; i++) {
-            double sum_grad = 0.0;
-            for (j = 0; j < OUTPUT_SIZE; j++)
-                sum_grad += net->W2[j * HIDDEN_SIZE + i] * d_out[j];
-            d_hid[i] = sum_grad * (hidden[i] > 0 ? 1.0 : 0.0);
-        }
-
-        // update W2
-        #pragma acc loop collapse(2)
-        for (i = 0; i < OUTPUT_SIZE; i++)
-            for (j = 0; j < HIDDEN_SIZE; j++)
-                net->W2[i * HIDDEN_SIZE + j] -= LEARNING_RATE * d_out[i] * hidden[j];
-
-        // update W1
-        #pragma acc loop collapse(2)
-        for (i = 0; i < HIDDEN_SIZE; i++)
-            for (j = 0; j < INPUT_SIZE; j++)
-                net->W1[i * INPUT_SIZE + j] -= LEARNING_RATE * d_hid[i] * in[j];
-
-        // update biases
-        #pragma acc loop
-        for (i = 0; i < OUTPUT_SIZE; i++) net->b2[i] -= LEARNING_RATE * d_out[i];
-        #pragma acc loop
-        for (i = 0; i < HIDDEN_SIZE; i++) net->b1[i] -= LEARNING_RATE * d_hid[i];
+    // Output gradient (small, so no pragma)
+    #pragma acc parallel present(out[0:OUTPUT_SIZE], tgt[0:OUTPUT_SIZE], d_out[0:OUTPUT_SIZE])
+    for (i = 0; i < OUTPUT_SIZE; i++) {
+        d_out[i] = out[i] - tgt[i];
     }
-}
 
+    // Hidden gradient
+    #pragma acc parallel loop present(net->W2[0:OUTPUT_SIZE*HIDDEN_SIZE], d_out[0:OUTPUT_SIZE], hidden[0:HIDDEN_SIZE], d_hid[0:HIDDEN_SIZE])
+    for (i = 0; i < HIDDEN_SIZE; i++) {
+        double sum_grad = 0.0;
+        for (j = 0; j < OUTPUT_SIZE; j++)
+            sum_grad += net->W2[j * HIDDEN_SIZE + i] * d_out[j];
+        d_hid[i] = sum_grad * (hidden[i] > 0 ? 1.0 : 0.0);
+    }
+
+    // Update W2
+    #pragma acc parallel loop collapse(2) present(net->W2[0:OUTPUT_SIZE*HIDDEN_SIZE], d_out[0:OUTPUT_SIZE], hidden[0:HIDDEN_SIZE])
+    for (i = 0; i < OUTPUT_SIZE; i++)
+        for (j = 0; j < HIDDEN_SIZE; j++)
+            net->W2[i * HIDDEN_SIZE + j] -= LEARNING_RATE * d_out[i] * hidden[j];
+
+    // Update W1
+    #pragma acc parallel loop collapse(2) present(net->W1[0:HIDDEN_SIZE*INPUT_SIZE], d_hid[0:HIDDEN_SIZE], in[0:INPUT_SIZE])
+    for (i = 0; i < HIDDEN_SIZE; i++)
+        for (j = 0; j < INPUT_SIZE; j++)
+            net->W1[i * INPUT_SIZE + j] -= LEARNING_RATE * d_hid[i] * in[j];
+
+    // Update biases (small loops, so no loop pragma)
+    //#pragma acc parallel present(net->b2[0:OUTPUT_SIZE], d_out[0:OUTPUT_SIZE])
+    for (i = 0; i < OUTPUT_SIZE; i++) net->b2[i] -= LEARNING_RATE * d_out[i];
+
+    #pragma acc parallel present(net->b1[0:HIDDEN_SIZE], d_hid[0:HIDDEN_SIZE])
+    for (i = 0; i < HIDDEN_SIZE; i++) net->b1[i] -= LEARNING_RATE * d_hid[i];
+}
 // Train (host delegating to device)
+
 void train(NeuralNetwork* net, double* images, double* labels, int numImages) {
     clock_t t0 = clock();
 
     #pragma acc data copyin(images[0:numImages*INPUT_SIZE], labels[0:numImages*OUTPUT_SIZE]) \
                      copy(net->W1[0:HIDDEN_SIZE*INPUT_SIZE], net->W2[0:OUTPUT_SIZE*HIDDEN_SIZE], net->b1[0:HIDDEN_SIZE], net->b2[0:OUTPUT_SIZE])
     {
-        double hidden[HIDDEN_SIZE], output[OUTPUT_SIZE];
-        #pragma acc enter data create(hidden[0:HIDDEN_SIZE], output[0:OUTPUT_SIZE])
+        double hidden[HIDDEN_SIZE], output[OUTPUT_SIZE], d_out[OUTPUT_SIZE], d_hid[HIDDEN_SIZE];
+        #pragma acc enter data create(hidden[0:HIDDEN_SIZE], output[0:OUTPUT_SIZE], d_out[0:OUTPUT_SIZE], d_hid[0:HIDDEN_SIZE])
 
         for (int ep = 0; ep < EPOCHS; ep++) {
             clock_t e0 = clock();
             double loss = 0; int correct = 0;
+            double fwd_time = 0.0;
+            double bwd_time = 0.0;
 
             for (int i_img = 0; i_img < numImages; i_img++) {
                 double* img = &images[i_img * INPUT_SIZE];
                 double* lbl = &labels[i_img * OUTPUT_SIZE];
 
+                clock_t fwd_start = clock();
                 forward(net, img, hidden, output);
-                backward(net, img, hidden, output, lbl);
-
                 #pragma acc update self(output[0:OUTPUT_SIZE])
-                // host-side loss/accuracy
+                clock_t fwd_end = clock();
+                fwd_time += (double)(fwd_end - fwd_start) / CLOCKS_PER_SEC;
+
                 for (int k = 0; k < OUTPUT_SIZE; k++) loss -= lbl[k] * log(output[k]);
                 int pred = 0, act = 0;
                 for (int j = 1; j < OUTPUT_SIZE; j++) {
@@ -155,12 +152,17 @@ void train(NeuralNetwork* net, double* images, double* labels, int numImages) {
                     if (lbl[j]    > lbl[act])    act  = j;
                 }
                 if (pred == act) correct++;
+
+                clock_t bwd_start = clock();
+                backward(net, img, hidden, output, lbl, d_out, d_hid);
+                clock_t bwd_end = clock();
+                bwd_time += (double)(bwd_end - bwd_start) / CLOCKS_PER_SEC;
             }
-            printf("Epoch %d - Loss: %.4f - Acc: %.2f%% - Time: %.3fs\n", 
-                   ep+1, loss/numImages, 100.0*correct/numImages, get_time(e0));
+            printf("Epoch %d - Loss: %.4f - Acc: %.2f%% - FWD: %.3fs - BWD: %.3fs - Time: %.3fs\n", 
+                   ep+1, loss/numImages, 100.0*correct/numImages, fwd_time, bwd_time, get_time(e0));
         }
 
-        #pragma acc exit data delete(hidden[0:HIDDEN_SIZE], output[0:OUTPUT_SIZE])
+        #pragma acc exit data delete(hidden[0:HIDDEN_SIZE], output[0:OUTPUT_SIZE], d_out[0:OUTPUT_SIZE], d_hid[0:HIDDEN_SIZE])
     }
     printf("Total training time: %.3fs\n", get_time(t0));
 }
